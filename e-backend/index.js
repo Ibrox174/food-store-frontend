@@ -10,7 +10,7 @@ function createApp({ database, adminApiKey = process.env.ADMIN_API_KEY } = {}) {
   const app = express();
 
   app.locals.store = store;
-  app.use(cors({ origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173' }));
+  app.use(cors({ origin: process.env.FRONTEND_ORIGIN || 'https://food-store-frontend-six.vercel.app' }));
   app.use(express.json({ limit: '32kb' }));
 
   app.get('/api/health', (req, res) => {
@@ -202,7 +202,7 @@ function validImageUrl(value) {
 if (require.main === module) {
   const app = createApp();
   const port = Number(process.env.PORT) || 5000;
-  app.listen(port, () => console.log(`Backend running on http://localhost:${port}`));
+  app.listen(port, () => console.log(`Backend listening on port ${port}`));
 }
 
 module.exports = { createApp, validateRestaurant };

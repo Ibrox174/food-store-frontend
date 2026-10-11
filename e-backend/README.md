@@ -11,7 +11,7 @@ $env:NOMINATIM_USER_AGENT = "YourStore/1.0 (operations@example.com)"
 npm run dev
 ```
 
-The database defaults to `e-backend/data/store.sqlite`. Set `DATABASE_PATH` to use another persistent disk location. `PORT` defaults to `5000`; set `FRONTEND_ORIGIN` to the deployed frontend origin when hosting the API separately.
+The database defaults to `e-backend/data/store.sqlite`. Set `DATABASE_PATH` to use another persistent disk location. `PORT` defaults to `5000`; set `FRONTEND_ORIGIN` to the deployed frontend origin when hosting the API separately. The default allowed frontend origin is `https://food-store-frontend-six.vercel.app`.
 
 In the frontend, set `VITE_API_BASE_URL` to the API origin for a separate deployment. During local Vite development, `/api` is proxied to `http://localhost:5000`.
 

@@ -1,82 +1,190 @@
-import { useEffect, useRef, useState } from 'react'
-import { BrowserRouter, Routes, Route, Link, Navigate, useNavigate } from 'react-router-dom'
+﻿import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { BrowserRouter, Routes, Route, Link, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import './App.css'
 
-// Simple in-memory/localStorage backed product store for the demo
-const PRODUCTS_KEY = 'chowdesk:products'
-function loadProducts() {
-  try {
-    const raw = localStorage.getItem(PRODUCTS_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
-  }
-}
-function saveProducts(products) {
-  localStorage.setItem(PRODUCTS_KEY, JSON.stringify(products))
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://e-backend-rust.vercel.app'
+
+// ---------- Auth context and helpers ----------
+const AuthContext = createContext(null)
+
+function useAuthContext() {
+  return useContext(AuthContext)
 }
 
-function useAuth() {
-  const [user, setUser] = useState(() => localStorage.getItem('chowdesk:token') || null)
-  const login = (username) => {
-    // For the demo, accept any username and store a token
-    const token = `token:${username}:${Date.now()}`
-    localStorage.setItem('chowdesk:token', token)
-    setUser(token)
+function AuthProvider({ children }) {
+  const [token, setToken] = useState(() => localStorage.getItem('chowdesk:token'))
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(!!token)
+
+  useEffect(() => {
+    async function fetchMe() {
+      if (!token) return setLoading(false)
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+        if (!res.ok) throw new Error('Invalid token')
+        const data = await res.json()
+        setUser(data.user || null)
+      } catch (err) {
+        console.warn('Auth verify failed', err)
+        localStorage.removeItem('chowdesk:token')
+        setToken(null)
+        setUser(null)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchMe()
+  }, [token])
+
+  const loginWithToken = (t) => {
+    localStorage.setItem('chowdesk:token', t)
+    setToken(t)
   }
   const logout = () => {
     localStorage.removeItem('chowdesk:token')
+    setToken(null)
     setUser(null)
   }
-  return { user, login, logout }
+
+  return (
+    <AuthContext.Provider value={{ token, user, loading, loginWithToken, logout }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+function fetchWithAuth(path, opts = {}) {
+  if (!API_BASE_URL) throw new Error('API_BASE_URL is not configured')
+  const token = localStorage.getItem('chowdesk:token')
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) }
+  if (token) headers.Authorization = `Bearer ${token}`
+  return fetch(`${API_BASE_URL}${path}`, { ...opts, headers })
 }
 
 function RequireAuth({ children }) {
-  const token = localStorage.getItem('chowdesk:token')
-  if (!token) return <Navigate to="/login" replace />
+  const { token, loading } = useAuthContext()
+  const location = useLocation()
+  if (loading) return <div style={{ padding: 24 }}>Checking authentication…</div>
+  if (!token) return <Navigate to={`/login?next=${encodeURIComponent(location.pathname)}`} replace />
   return children
 }
 
+// ---------- Login and OAuth callback ----------
 function LoginPage() {
   const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
   const navigate = useNavigate()
-  const auth = useAuth()
+  const location = useLocation()
+  const next = new URLSearchParams(location.search).get('next') || '/admin'
 
-  function submit(e) {
+  async function submitForm(e) {
     e.preventDefault()
-    if (!username.trim()) return
-    auth.login(username.trim())
-    navigate('/admin')
+    setError('')
+    if (!API_BASE_URL) return setError('API base URL not configured (set VITE_API_BASE_URL)')
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.message || 'Login failed')
+      }
+      const data = await res.json()
+      if (data.token) {
+        localStorage.setItem('chowdesk:token', data.token)
+        navigate(next)
+      } else {
+        throw new Error('No token returned')
+      }
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  function startOAuth() {
+    if (!API_BASE_URL) return setError('API base URL not configured')
+    // Redirect to backend OAuth authorize endpoint. Backend should handle client_id, state, redirect_uri.
+    const redirectUri = `${window.location.origin}/auth/callback`
+    window.location.href = `${API_BASE_URL}/oauth/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`
   }
 
   return (
     <div className="login-page">
       <div className="login-card">
-        <h2>Admin login</h2>
-        <form onSubmit={submit}>
+        <h2>Admin sign in</h2>
+
+        <div className="oauth-actions">
+          <button type="button" className="primary-button" onClick={startOAuth}>Sign in with OAuth</button>
+        </div>
+
+        <div className="divider">or</div>
+
+        <form onSubmit={submitForm} className="local-login">
           <label>
             Username
             <input value={username} onChange={(e) => setUsername(e.target.value)} />
           </label>
           <label>
             Password
-            <input type="password" placeholder="(any for demo)" />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
           </label>
+          {error && <div className="form-error">{error}</div>}
           <div className="login-actions">
             <button type="submit" className="primary-button">Sign in</button>
             <Link to="/">Back to store</Link>
           </div>
         </form>
+
+        <p className="login-help">If you prefer OAuth, use the button above. Backend must expose /oauth/authorize and /api/auth/oauth/token endpoints.</p>
       </div>
     </div>
   )
 }
 
+function AuthCallback() {
+  const navigate = useNavigate()
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    async function handleCallback() {
+      const params = new URLSearchParams(window.location.search)
+      const code = params.get('code')
+      if (!code) return setError('Authorization code not found in callback URL')
+      try {
+        const redirectUri = `${window.location.origin}/auth/callback`
+        const res = await fetch(`${API_BASE_URL}/api/auth/oauth/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code, redirect_uri: redirectUri }),
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body.message || 'Token exchange failed')
+        }
+        const data = await res.json()
+        if (!data.token) throw new Error('No token returned')
+        localStorage.setItem('chowdesk:token', data.token)
+        navigate('/admin')
+      } catch (err) {
+        setError(err.message)
+      }
+    }
+    handleCallback()
+  }, [navigate])
+
+  if (error) return <div style={{ padding: 24 }}>OAuth error: {error}</div>
+  return <div style={{ padding: 24 }}>Finishing sign in…</div>
+}
+
+// ---------- Admin UI (shell and pages) ----------
 function AdminShell({ children }) {
   const navigate = useNavigate()
-  const auth = useAuth()
+  const { logout } = useAuthContext()
   const handleLogout = () => {
-    auth.logout()
+    logout()
     navigate('/login')
   }
 
@@ -123,7 +231,7 @@ function Overview() {
       <header className="admin-header">
         <div>
           <p className="eyebrow">Operations dashboard</p>
-          <h1>Welcome back, Operator</h1>
+          <h1>Welcome back</h1>
         </div>
       </header>
 
@@ -176,7 +284,6 @@ function LiveChart() {
     ctx.lineWidth = 2
     ctx.stroke()
 
-    // gradient fill
     ctx.lineTo(pad + width, pad + height)
     ctx.lineTo(pad, pad + height)
     ctx.closePath()
@@ -195,34 +302,69 @@ function LiveChart() {
 }
 
 function ProductsPage() {
-  const [products, setProducts] = useState(loadProducts)
+  const [products, setProducts] = useState([])
+  const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({ name: '', price: '', sku: '' })
+  const { token } = useAuthContext()
 
-  useEffect(() => saveProducts(products), [products])
+  useEffect(() => {
+    async function load() {
+      setLoading(true)
+      try {
+        const res = await fetchWithAuth('/api/admin/products')
+        if (!res.ok) throw new Error('Failed to load products')
+        const data = await res.json()
+        setProducts(data.products || data)
+      } catch (err) {
+        console.error(err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    load()
+  }, [token])
 
-  function startAdd() {
-    setEditing(null)
-    setForm({ name: '', price: '', sku: '' })
-  }
-  function startEdit(p) {
-    setEditing(p.sku)
-    setForm({ name: p.name, price: p.price, sku: p.sku })
-  }
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault()
     if (!form.name.trim()) return
-    if (editing) {
-      setProducts((prev) => prev.map((p) => p.sku === editing ? { ...p, ...form } : p))
-    } else {
-      setProducts((prev) => [{ ...form, id: Date.now() }, ...prev])
+    try {
+      let res
+      if (editing) {
+        res = await fetchWithAuth(`/api/admin/products/${encodeURIComponent(editing)}`, {
+          method: 'PUT',
+          body: JSON.stringify(form),
+        })
+      } else {
+        res = await fetchWithAuth('/api/admin/products', { method: 'POST', body: JSON.stringify(form) })
+      }
+      if (!res.ok) throw new Error('Save failed')
+      const saved = await res.json()
+      // reload list
+      const listRes = await fetchWithAuth('/api/admin/products')
+      const list = await listRes.json()
+      setProducts(list.products || list)
+      setEditing(null)
+      setForm({ name: '', price: '', sku: '' })
+    } catch (err) {
+      alert(err.message)
     }
-    setEditing(null)
-    setForm({ name: '', price: '', sku: '' })
   }
-  function remove(sku) {
+
+  async function startEdit(p) {
+    setEditing(p.id || p.sku)
+    setForm({ name: p.name, price: p.price, sku: p.sku || '' })
+  }
+
+  async function remove(id) {
     if (!confirm('Remove product?')) return
-    setProducts((prev) => prev.filter((p) => p.sku !== sku))
+    try {
+      const res = await fetchWithAuth(`/api/admin/products/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error('Delete failed')
+      setProducts((prev) => prev.filter((x) => (x.id || x.sku) !== id))
+    } catch (err) {
+      alert(err.message)
+    }
   }
 
   return (
@@ -233,7 +375,7 @@ function ProductsPage() {
           <h3>Product management</h3>
         </div>
         <div>
-          <button type="button" className="panel-button" onClick={startAdd}>New product</button>
+          <button type="button" className="panel-button" onClick={() => { setEditing(null); setForm({ name: '', price: '', sku: '' }) }}>New product</button>
         </div>
       </div>
 
@@ -257,21 +399,23 @@ function ProductsPage() {
         </form>
 
         <div style={{ marginTop: 18 }}>
-          {products.length ? products.map((p) => (
-            <div key={p.sku} className="stock-item">
-              <div>
-                <strong>{p.name}</strong>
-                <small>{p.sku}</small>
-              </div>
-              <div className="stock-meta">
-                <span>{p.price || '—'}</span>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button type="button" className="panel-button muted" onClick={() => startEdit(p)}>Edit</button>
-                  <button type="button" className="panel-button muted" onClick={() => remove(p.sku)}>Remove</button>
+          {loading ? <p>Loading products…</p> : (
+            products.length ? products.map((p) => (
+              <div key={(p.id || p.sku)} className="stock-item">
+                <div>
+                  <strong>{p.name}</strong>
+                  <small>{p.sku || p.id}</small>
+                </div>
+                <div className="stock-meta">
+                  <span>{p.price || '—'}</span>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button type="button" className="panel-button muted" onClick={() => startEdit(p)}>Edit</button>
+                    <button type="button" className="panel-button muted" onClick={() => remove(p.id || p.sku)}>Remove</button>
+                  </div>
                 </div>
               </div>
-            </div>
-          )) : <p>No products yet</p>}
+            )) : <p>No products yet</p>
+          )}
         </div>
       </div>
     </div>
@@ -297,25 +441,28 @@ function Analytics() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/admin/*" element={
-          <RequireAuth>
-            <AdminShell>
-              <Routes>
-                <Route index element={<Overview />} />
-                <Route path="products" element={<ProductsPage />} />
-                <Route path="analytics" element={<Analytics />} />
-                <Route path="*" element={<Overview />} />
-              </Routes>
-            </AdminShell>
-          </RequireAuth>
-        } />
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/auth/callback" element={<AuthCallback />} />
 
-        <Route path="/" element={<div style={{padding:30}}><h2>Storefront placeholder</h2><p><Link to="/admin">Go to admin</Link> — or <Link to="/login">Sign in</Link></p></div>} />
-      </Routes>
-    </BrowserRouter>
+          <Route path="/admin/*" element={
+            <RequireAuth>
+              <AdminShell>
+                <Routes>
+                  <Route index element={<Overview />} />
+                  <Route path="products" element={<ProductsPage />} />
+                  <Route path="analytics" element={<Analytics />} />
+                  <Route path="*" element={<Overview />} />
+                </Routes>
+              </AdminShell>
+            </RequireAuth>
+          } />
+
+          <Route path="/" element={<div style={{padding:30}}><h2>Storefront placeholder</h2><p><Link to="/admin">Go to admin</Link> — or <Link to="/login">Sign in</Link></p></div>} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
   )
 }
-
